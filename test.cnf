@@ -1,0 +1,6 @@
+c This formula is mathematically impossible (UNSAT)
+p cnf 2 4
+1 2 0
+1 -2 0
+-1 2 0
+-1 -2 0

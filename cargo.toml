@@ -1,0 +1,14 @@
+[package]
+name = "elite_sat_solver"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# We can keep dependencies minimal or zero for pure speed, 
+# but a fast CLI parser or bitset crate can be added if needed later.
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
