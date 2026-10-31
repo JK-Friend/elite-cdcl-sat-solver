@@ -1,5 +1,5 @@
-use crate::types::{Lit, Var};
 use crate::clause::{Clause, ClauseId};
+use crate::types::{Lit, Var};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum LBool {
@@ -17,7 +17,7 @@ pub struct Solver {
     trail_lim: Vec<usize>,
     reason: Vec<Option<ClauseId>>,
     level: Vec<usize>,
-    
+
     // VSIDS & Conflict Learning State
     activity: Vec<f64>,
     var_inc: f64,
@@ -52,8 +52,9 @@ impl Solver {
     pub fn add_clause(&mut self, lits: Vec<Lit>, is_learned: bool) {
         let cid = ClauseId(self.clauses.len());
         if lits.len() >= 2 {
-            self.watches[lits[0].negate().index()].push(cid);
-            self.watches[lits[1].negate().index()].push(cid);
+            // FIXED: Watch the literal directly so it triggers when falsified
+            self.watches[lits[0].index()].push(cid);
+            self.watches[lits[1].index()].push(cid);
             self.watch_data.push((0, 1));
         } else {
             self.watch_data.push((0, 0));
@@ -67,7 +68,11 @@ impl Solver {
         if v == LBool::Undef {
             LBool::Undef
         } else if lit.sign() {
-            if v == LBool::False { LBool::True } else { LBool::False }
+            if v == LBool::False {
+                LBool::True
+            } else {
+                LBool::False
+            }
         } else {
             v
         }
@@ -92,15 +97,19 @@ impl Solver {
             trail_head += 1;
 
             let mut i = 0;
-            let mut watches_list = std::mem::take(&mut self.watches[p.index()]);
+            let mut watches_list = std::mem::take(&mut self.watches[p.negate().index()]);
 
             while i < watches_list.len() {
                 let cid = watches_list[i];
                 let clause = &self.clauses[cid.0];
-                
+
                 let (w0, w1) = self.watch_data[cid.0];
-                let other_watch_idx = if clause.lits[w0] == p.negate() { w0 } else { w1 };
-                
+                let other_watch_idx = if clause.lits[w0] == p.negate() {
+                    w1
+                } else {
+                    w0
+                };
+
                 if self.value_lit(clause.lits[other_watch_idx]) == LBool::True {
                     i += 1;
                     continue;
@@ -109,8 +118,13 @@ impl Solver {
                 let mut found_new_watch = false;
                 for k in 0..clause.len() {
                     if k != w0 && k != w1 && self.value_lit(clause.lits[k]) != LBool::False {
-                        self.watch_data[cid.0] = if other_watch_idx == w0 { (k, w1) } else { (w0, k) };
-                        let new_watch_lit = clause.lits[k].negate();
+                        self.watch_data[cid.0] = if other_watch_idx == w0 {
+                            (k, w1)
+                        } else {
+                            (w0, k)
+                        };
+                        // FIXED: use literal directly for new watch index
+                        let new_watch_lit = clause.lits[k];
                         self.watches[new_watch_lit.index()].push(cid);
                         found_new_watch = true;
                         break;
@@ -121,13 +135,17 @@ impl Solver {
                     watches_list.swap_remove(i);
                 } else {
                     if self.value_lit(clause.lits[other_watch_idx]) == LBool::False {
-                        self.watches[p.index()].extend(watches_list);
+                        self.watches[p.negate().index()] = watches_list;
                         return Some(cid);
                     } else {
                         let lit_to_propagate = clause.lits[other_watch_idx];
                         let var = lit_to_propagate.var();
-                        let val = if lit_to_propagate.sign() { LBool::False } else { LBool::True };
-                        
+                        let val = if lit_to_propagate.sign() {
+                            LBool::False
+                        } else {
+                            LBool::True
+                        };
+
                         self.assignment[var.0 as usize] = val;
                         self.level[var.0 as usize] = self.trail_lim.len();
                         self.reason[var.0 as usize] = Some(cid);
@@ -136,7 +154,7 @@ impl Solver {
                     }
                 }
             }
-            self.watches[p.index()] = watches_list;
+            self.watches[p.negate().index()] = watches_list;
         }
         None
     }
@@ -161,7 +179,7 @@ impl Solver {
         loop {
             let clause_lits = self.clauses[curr_cid.unwrap().0].lits.clone();
             let start_j = if curr_cid == Some(conflict_cid) { 0 } else { 1 };
-            
+
             for j in start_j..clause_lits.len() {
                 let q = clause_lits[j];
                 let v = q.var();
@@ -199,11 +217,16 @@ impl Solver {
         learnt_lits[0] = p.negate();
 
         let mut backjump_level = 0;
+        let mut max_i = 1;
         for i in 1..learnt_lits.len() {
             let l_level = self.level[learnt_lits[i].var().0 as usize];
             if l_level > backjump_level {
                 backjump_level = l_level;
+                max_i = i;
             }
+        }
+        if learnt_lits.len() > 1 {
+            learnt_lits.swap(1, max_i);
         }
 
         (learnt_lits, backjump_level)
@@ -217,11 +240,38 @@ impl Solver {
                 let v_idx = lit.var().0 as usize;
                 self.assignment[v_idx] = LBool::Undef;
                 self.reason[v_idx] = None;
+                self.level[v_idx] = 0;
             }
         }
     }
 
     pub fn solve(&mut self) -> bool {
+        // Process initial unit clauses at level 0
+        for cid_idx in 0..self.clauses.len() {
+            let clause = &self.clauses[cid_idx];
+            if clause.len() == 1 {
+                let lit = clause.lits[0];
+                let var = lit.var();
+                let val = if lit.sign() {
+                    LBool::False
+                } else {
+                    LBool::True
+                };
+                let v_idx = var.0 as usize;
+
+                if self.assignment[v_idx] != LBool::Undef {
+                    if self.assignment[v_idx] != val {
+                        return false;
+                    }
+                } else {
+                    self.assignment[v_idx] = val;
+                    self.level[v_idx] = 0;
+                    self.reason[v_idx] = Some(ClauseId(cid_idx));
+                    self.trail.push(lit);
+                }
+            }
+        }
+
         if self.propagate().is_some() {
             return false;
         }
@@ -273,7 +323,11 @@ impl Solver {
                 }
 
                 let var = lit_to_prop.var();
-                let val = if lit_to_prop.sign() { LBool::False } else { LBool::True };
+                let val = if lit_to_prop.sign() {
+                    LBool::False
+                } else {
+                    LBool::True
+                };
                 self.assignment[var.0 as usize] = val;
                 self.level[var.0 as usize] = backjump_level;
                 self.reason[var.0 as usize] = Some(cid);
